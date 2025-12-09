@@ -42,10 +42,10 @@ from model import DiT, Encoder, Decoder
 from model_utils import create_encoder_step
 from data_utils import generate_dataset
 from geoelectric_dataset import log_normalize_data, log_denormalize_data
+from geoelectric_dataset import load_geoelectric_data
 
 
-
-def plot_inversion_result(y_true, y_pred, step, save_path, wandb_log=False, y_min=None, y_max=None, depth_range=(0, 1200), resistivity_range=(0, 200)):
+def _plot_inversion_result(y_true, y_pred, step, save_path, wandb_log=False, y_min=None, y_max=None, depth_range=(0, 1200), resistivity_range=(0, 200)):
     """
     绘制反演结果可视化：真实曲线 vs 预测曲线
     """
@@ -105,6 +105,199 @@ def plot_inversion_result(y_true, y_pred, step, save_path, wandb_log=False, y_mi
         wandb.log({"Inversion Visualization": wandb.Image(img_path)}, step=step)
 
 
+def plot_inversion_result(y_true, y_pred, step, save_path, wandb_log=False, y_min=None, y_max=None, depth_range=(0, 1200), resistivity_range=(0, 200), use_log_scale=False):
+    """
+    绘制反演结果可视化：真实曲线 vs 预测曲线
+    """
+    # 数据验证和预处理
+    print(f'y_true shape: {y_true.shape}, y_pred shape: {y_pred.shape}')
+    try:
+        # 转换为numpy数组
+        y_true = np.array(y_true)
+        y_pred = np.array(y_pred)
+        
+        # 检查数据有效性
+        if np.any(np.isnan(y_true)) or np.any(np.isnan(y_pred)):
+            print(f"警告：步骤 {step} 的数据包含NaN值，跳过绘图")
+            return
+            
+        if np.any(np.isinf(y_true)) or np.any(np.isinf(y_pred)):
+            print(f"警告：步骤 {step} 的数据包含无穷值，跳过绘图")
+            return
+        
+        # 处理数据形状：确保是1D数组
+        if y_true.ndim == 3:
+            y_true = y_true[0, :, 0]  # 取第一个样本的第一个通道
+        elif y_true.ndim == 2:
+            y_true = y_true[0, :]  # 取第一个样本
+        elif y_true.ndim == 1:
+            pass  # 已经是1D
+        else:
+            print(f"警告：y_true的形状 {y_true.shape} 不支持，跳过绘图")
+            return
+            
+        if y_pred.ndim == 3:
+            y_pred = y_pred[0, :, 0]  # 取第一个样本的第一个通道
+        elif y_pred.ndim == 2:
+            y_pred = y_pred[0, :]  # 取第一个样本
+        elif y_pred.ndim == 1:
+            pass  # 已经是1D
+        else:
+            print(f"警告：y_pred的形状 {y_pred.shape} 不支持，跳过绘图")
+            return
+        
+        # 检查数据长度是否一致
+        if len(y_true) != len(y_pred):
+            print(f"警告：y_true长度({len(y_true)})与y_pred长度({len(y_pred)})不一致")
+            min_len = min(len(y_true), len(y_pred))
+            y_true = y_true[:min_len]
+            y_pred = y_pred[:min_len]
+        
+        # 反归一化处理
+        if y_min is not None and y_max is not None:
+            try:
+                y_true = log_denormalize_data(y_true, y_min, y_max)
+                y_pred = log_denormalize_data(y_pred, y_min, y_max)
+            except Exception as e:
+                print(f"反归一化失败: {e}，使用原始数据绘图")
+        
+        # 检查反归一化后的数据范围
+        y_true_range = (np.min(y_true), np.max(y_true))
+        y_pred_range = (np.min(y_pred), np.max(y_pred))
+        print(f"步骤 {step} - 真实值范围: {y_true_range}, 预测值范围: {y_pred_range}")
+        
+        # 如果预测值超出合理范围，进行截断
+        y_pred_clipped = np.clip(y_pred, -1000, 10000)  # 合理的电阻率范围
+        if not np.array_equal(y_pred, y_pred_clipped):
+            print(f"警告：预测值超出范围，已进行截断处理")
+            y_pred = y_pred_clipped
+        
+        # 创建深度坐标
+        num_points = len(y_true)
+        depths = np.linspace(depth_range[0], depth_range[1], num_points)
+        
+        # 自适应调整绘图范围
+        data_min = min(np.min(y_true), np.min(y_pred))
+        data_max = max(np.max(y_true), np.max(y_pred))
+        
+        # 确保数据都是正数（对数刻度要求）
+        positive_min = 1e-2  # 最小正值
+        y_true_positive = np.clip(y_true, positive_min, None)
+        y_pred_positive = np.clip(y_pred, positive_min, None)
+        
+        # 计算调整后的范围
+        if use_log_scale:
+            # 对数刻度下的范围计算
+            log_min = min(np.log10(np.min(y_true_positive)), np.log10(np.min(y_pred_positive)))
+            log_max = max(np.log10(np.max(y_true_positive)), np.log10(np.max(y_pred_positive)))
+            
+            # 扩大10%的边距
+            margin = (log_max - log_min) * 0.1
+            log_range = (log_min - margin, log_max + margin)
+            
+            # 转换回线性刻度
+            adjusted_min = 10 ** log_range[0]
+            adjusted_max = 10 ** log_range[1]
+            resistivity_range = (adjusted_min, adjusted_max)
+            print(f"对数刻度调整后绘图范围: {resistivity_range}")
+        else:
+            # # 线性刻度下的范围计算
+            # if data_min < resistivity_range[0] or data_max > resistivity_range[1]:
+            #     # 扩大绘图范围以适应数据
+            #     margin = (data_max - data_min) * 0.1  # 10%的边距
+            #     adjusted_range = (max(0, data_min - margin), data_max + margin)
+            #     print(f"线性刻度调整后绘图范围: {adjusted_range}")
+            #     resistivity_range = adjusted_range
+            min_val = 0
+            # 确保范围上限至少为 10000，或略大于数据最大值
+            data_max = max(np.max(y_true), np.max(y_pred))
+            max_val = max(data_max, 10000) 
+            
+            # 增加少量边距，防止曲线紧贴边界
+            margin = (max_val - min_val) * 0.05
+            resistivity_range = (min_val, max_val + margin)
+            print(f"线性刻度调整后绘图范围: {resistivity_range}")
+        
+        plt.figure(figsize=(10, 6))
+
+        # 绘制曲线
+        if use_log_scale:
+            # 使用对数刻度
+            plt.semilogy(depths, y_true_positive, linewidth=2.5, color='blue', label="True Curve")
+            plt.semilogy(depths, y_pred_positive, linewidth=2.5, linestyle='--', color='red', label="Predicted Curve")
+        else:
+            # 使用线性刻度
+            plt.plot(depths, y_true, linewidth=2.5, color='blue', label="True Curve")
+            plt.plot(depths, y_pred, linewidth=2.5, linestyle='--', color='red', label="Predicted Curve")
+
+        # 设置坐标轴范围和标签
+        plt.xlim(depth_range)
+        plt.ylim(resistivity_range)
+        
+        # 设置自定义刻度
+        plt.xticks(np.arange(depth_range[0], depth_range[1] + 1, 400))
+        
+        if use_log_scale:
+            # 对数刻度下的智能刻度
+            from matplotlib.ticker import LogLocator, ScalarFormatter
+            plt.gca().yaxis.set_major_locator(LogLocator(base=10.0, numticks=10))
+            plt.gca().yaxis.set_major_formatter(ScalarFormatter())
+            plt.gca().yaxis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(2, 10), numticks=10))
+            plt.gca().yaxis.set_minor_formatter(ScalarFormatter())
+        else:
+            # # 线性刻度下的智能刻度
+            # y_range = resistivity_range[1] - resistivity_range[0]
+            # if y_range <= 5:
+            #     y_tick_step = 0.5
+            # elif y_range <= 20:
+            #     y_tick_step = 2
+            # elif y_range <= 100:
+            #     y_tick_step = 10
+            # else:
+            #     y_tick_step = 20
+            
+            # plt.yticks(np.arange(resistivity_range[0], resistivity_range[1] + 1, y_tick_step))
+            custom_yticks = np.arange(0, 10001, 1000) # 生成 0, 1000, ..., 10000
+    
+            # 检查自定义刻度是否在调整后的绘图范围内
+            if custom_yticks[-1] <= resistivity_range[1]:
+                plt.yticks(custom_yticks)
+            else:
+                # 如果自定义刻度超出范围（例如，数据最大值超过 10000，但刻度只到 10000），
+                # 则使用自定义列表，但图可能会裁切
+                plt.yticks(custom_yticks)
+                print("注意：实际绘图上限可能高于10000，但刻度仍设定为 10000。")
+        
+        # 设置标签和标题
+        plt.xlabel("Depth (m)", fontsize=14)
+        plt.ylabel("Resistivity (Ω·m)", fontsize=14)
+        plt.title(f"Inversion Result (Step {step})", fontsize=16)
+        
+        plt.grid(alpha=0.3, which='both')  # 显示所有网格线
+        plt.legend(fontsize=12)
+
+        # 添加数据统计信息
+        mse = np.mean((y_true - y_pred) ** 2)
+        rmse = np.sqrt(mse)
+        plt.text(0.02, 0.98, f'RMSE: {rmse:.2f} Ω·m', 
+                 transform=plt.gca().transAxes, fontsize=12,
+                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+        # 保存文件
+        img_path = os.path.join(save_path, f"inversion_step_{step}.png")
+        plt.savefig(img_path, dpi=200)
+        plt.close()
+
+        print(f"Saved inversion plot: {img_path}")
+
+        # 上传到 WandB
+        if wandb_log:
+            wandb.log({"Inversion Visualization": wandb.Image(img_path)}, step=step)
+            
+    except Exception as e:
+        print(f"绘图过程中发生错误: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def train_and_evaluate(config: ml_collections.ConfigDict):
@@ -186,34 +379,28 @@ def train_and_evaluate(config: ml_collections.ConfigDict):
         # -------------------
     # 4) Dataset and coords - KEEP CONSISTENT WITH FAE TRAINING
     # -------------------
-    # 加载自编码器的归一化参数
-    normalization_path = os.path.join(os.getcwd(), fae_job, "normalization_params.npz")
-    if os.path.exists(normalization_path):
-        norm_params = np.load(normalization_path)
-        y_min = norm_params['y_min']
-        y_max = norm_params['y_max']
-        print(f"✅ 加载自编码器归一化参数: y_min={y_min:.3f}, y_max={y_max:.3f}")
-    else:
-        raise FileNotFoundError(f"未找到自编码器归一化参数: {normalization_path}")
-
-    # 为扩散模型生成训练数据（使用与自编码器相同的参数）
-    x_train, y_train = generate_dataset(num_samples=config.dataset.num_samples,
+    
+    # 为扩散模型生成训练数据
     # 数据说明
     # x_train 是坐标数据 (0到1的等间距值)，在所有样本中相同
     # y_train 是目标函数值，在不同样本中变化
-    
-                                        num_sensors=config.dataset.num_sensors)
+    x_train, y_train = load_geoelectric_data('./train_data.json')
+    # 自动计算归一化参数
+    # 首先尝试加载已保存的归一化参数
+    # 从训练数据中计算归一化参数
+    y_min = float(y_train.min())
+    y_max = float(y_train.max())
+    print(f" 计算归一化参数: y_min={y_min:.3f}, y_max={y_max:.3f}")
 
-    print("使用自编码器的归一化参数...")
-
-    # 使用自编码器的归一化参数对训练数据进行归一化
+    # 使用计算的归一化参数对训练数据进行归一化
     x_train_normalized = x_train  # 坐标数据保持原样
     y_train_normalized, _, _ = log_normalize_data(y_train, data_min=y_min, data_max=y_max)
 
     print(f"✅ 扩散模型训练数据检查:")
-    print(f"   x_train: [{x_train_normalized.min():.3f}, {x_train_normalized.max():.3f}] (坐标数据)")
-    print(f"   y_train: [{y_train_normalized.min():.3f}, {y_train_normalized.max():.3f}] (使用自编码器归一化)")
-    print(f"   使用的归一化范围 - y: [{y_min:.3e}, {y_max:.3e}]")
+    # print(f"   x_train: [{x_train_normalized.min():.3f}, {x_train_normalized.max():.3f}] (坐标数据)")
+    print(f"   y_train: [{y_train_normalized.min():.3f}, {y_train_normalized.max():.3f}] (归一化后)")
+    print(f"   原始数据范围 - y: [{y_min:.3e}, {y_max:.3e}]")
+    # print(f"   归一化参数保存路径: {normalization_path}")
 
     # 合并输入（保持与自编码器训练一致）
     condition_data = x_train_normalized  # 只包含坐标数据作为条件
@@ -250,27 +437,53 @@ def train_and_evaluate(config: ml_collections.ConfigDict):
     # 5) Prepare test set (keep shapes consistent)
     # -------------------
     test_data_path = os.path.join(os.getcwd(), fae_job, "test_data.npz")
-    if os.path.exists(test_data_path):
-        print("✅ 加载自编码器的测试集...")
+    normalization_path = os.path.join(os.getcwd(), fae_job, "normalization_params.npz") 
+    print(f"Looking for test data at: {test_data_path}")
+    print(f"Looking for normalization params at: {normalization_path}")
+    if os.path.exists(test_data_path) and os.path.exists(normalization_path):
+        print("✅ 加载自编码器的测试集和归一化参数...")
+        print(f"Looking for test data at: {test_data_path}")
         test_data = np.load(test_data_path)
         x_test = test_data['x_test']
         y_test = test_data['y_test']
 
-        # 使用相同的归一化参数
-        normalization_path = os.path.join(os.getcwd(), fae_job, "normalization_params.npz")
-        if os.path.exists(normalization_path):
-            norm_params = np.load(normalization_path)
-            y_min = norm_params['y_min']
-            y_max = norm_params['y_max']
-            y_test_normalized = log_normalize_data(y_test, data_min=y_min, data_max=y_max)[0]
-        else:
-            # 如果没有归一化参数，重新归一化
-            y_test_normalized, y_min, y_max = log_normalize_data(y_test)
+        norm_params = np.load(normalization_path)  
+        y_min = float(norm_params['y_min'])
+        y_max = float(norm_params['y_max'])
     
-        x_test_normalized = x_test  # 坐标数据不需要归一化
-    
-        print(f"   测试集: x_test{x_test_normalized.shape}, y_test{y_test_normalized.shape}")
+        print(f"   测试集形状: x_test{x_test.shape}, y_test{y_test.shape}")
+        print(f"   测试数据范围: [{y_test.min():.3f}, {y_test.max():.3f}]")
         print(f"   归一化参数: y_min={y_min:.3f}, y_max={y_max:.3f}")
+        # 验证数据是否确实是归一化的
+        if y_test.min() < -10 or y_test.max() > 10:
+            print(f"⚠️  警告：测试数据范围异常 [{y_test.min():.3f}, {y_test.max():.3f}]")
+            print("   数据可能未正确归一化或使用了不同的归一化方式")
+    else:
+        # 如果没有测试数据文件，从训练数据中分割一部分作为测试集
+        print("⚠️ 未找到测试数据文件，从训练数据中分割20%作为测试集...")
+        split_idx = int(0.8 * len(x_train))
+        
+        # 注意：这里分割的是原始数据，而不是归一化后的数据
+        x_test = x_train[split_idx:]
+        y_test = y_train[split_idx:]
+        x_train = x_train[:split_idx]
+        y_train = y_train[:split_idx]
+        
+        # 重新计算测试数据的归一化参数（基于原始数据）
+        y_test_min = float(y_test.min())
+        y_test_max = float(y_test.max())
+        
+        # 使用测试数据自身的归一化参数进行归一化
+        y_test_normalized = log_normalize_data(y_test, data_min=y_test_min, data_max=y_test_max)[0]
+        x_test_normalized = x_test  # 坐标数据不需要归一化
+        
+        # 重新归一化训练数据
+        y_train_normalized = log_normalize_data(y_train, data_min=y_min, data_max=y_max)[0]
+        x_train_normalized = x_train
+        
+        print(f"   训练集: x_train{x_train_normalized.shape}, y_train{y_train_normalized.shape}")
+        print(f"   测试集: x_test{x_test_normalized.shape}, y_test{y_test_normalized.shape}")
+        print(f"   测试数据归一化参数: y_min={y_test_min:.3f}, y_max={y_test_max:.3f}")
 
     # 使用归一化后的数据
     condition_data_test = x_test_normalized  # 只包含坐标数据作为条件
@@ -318,13 +531,17 @@ def train_and_evaluate(config: ml_collections.ConfigDict):
                 rmse_val, normalized_rmse_val, y_pred_val, y_true_val = end_to_end_eval_step(
                     fae_state, state, test_batch
                 )
+
+                # print(f'pred_res = {y_pred_val}')
+                # print(f'true_res = {y_true_val}')
+
                 if jax.process_index() == 0:  # 只在主进程画图
                     plot_inversion_result(
                         y_true_val, y_pred_val,
                         step,
                         save_path,
-                        y_min=y_min,  # 传递归一化参数
-                        y_max=y_max,  # 传递归一化参数
+                        y_min=y_min,  # 使用测试数据的归一化参数
+                        y_max=y_max,  # 使用测试数据的归一化参数
                         wandb_log=True
                     )
                 rmse_val = float(rmse_val) if rmse_val is not None else None
